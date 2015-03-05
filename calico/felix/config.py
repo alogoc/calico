@@ -29,9 +29,25 @@ import logging
 import socket
 
 from calico import common
+from calico.felix import fetcd
+
+# TODO: This purely reads from the config files. Should do better, but valid
+# intermediate state.
 
 # Logger
 log = logging.getLogger(__name__)
+
+# Finally, convert log level names into python log levels.
+LOGLEVELS = {"none":      None,
+             "debug":     logging.DEBUG,
+             "info":      logging.INFO,
+             "warn":      logging.WARNING,
+             "warning":   logging.WARNING,
+             "err":       logging.ERROR,
+             "error":     logging.ERROR,
+             "crit":      logging.CRITICAL,
+             "critical":  logging.CRITICAL}
+
 
 class ConfigException(Exception):
     def __init__(self, message, path):
@@ -43,79 +59,52 @@ class ConfigException(Exception):
 
 class Config(object):
     def __init__(self, config_path):
+        """
+        Create a config.
+        :raises EtcdException
+        # TODO: worth tidying this up, since cfg file stuff is overkill.
+        """
         self._KnownSections = set()
         self._KnownObjects  = set()
 
-        self._config_path   = config_path
+        self._config_path = config_path
 
         self.read_cfg_file(config_path)
 
-        self.EP_RETRY_INT_MS = int(
-            self.get_cfg_entry("global",
-                               "EndpointRetryTimeMillis",
-                               500))
-        self.RESYNC_INT_SEC  = int(
-            self.get_cfg_entry("global",
-                               "ResyncIntervalSecs",
-                               1800))
+        self.ETCD_PORT = self.get_cfg_entry("global", "EtcdPort", 4001)
 
-        self.HOSTNAME        = self.get_cfg_entry("global",
-                                                  "FelixHostname",
-                                                  socket.gethostname())
+        self.HOSTNAME = self.get_cfg_entry("global",
+                                           "FelixHostname",
+                                           socket.gethostname())
 
-        self.PLUGIN_ADDR     = self.get_cfg_entry("global",
-                                                  "PluginAddress")
-        self.ACL_ADDR        = self.get_cfg_entry("global",
-                                                  "ACLAddress")
-        self.METADATA_IP     = self.get_cfg_entry("global",
-                                                  "MetadataAddr",
-                                                  "127.0.0.1")
-        self.METADATA_PORT   = self.get_cfg_entry("global",
-                                                  "MetadataPort",
-                                                  "8775")
-        self.LOCAL_ADDR      = self.get_cfg_entry("global",
-                                                  "LocalAddress",
-                                                  "*")
-        self.LOGFILE         = self.get_cfg_entry("log",
-                                                  "LogFilePath",
-                                                  "None")
-        self.LOGLEVFILE      = self.get_cfg_entry("log",
-                                                  "LogSeverityFile",
-                                                  "INFO")
-        self.LOGLEVSYS       = self.get_cfg_entry("log",
-                                                  "LogSeveritySys",
-                                                  "ERROR")
-        self.LOGLEVSCR       = self.get_cfg_entry("log",
-                                                  "LogSeverityScreen",
-                                                  "ERROR")
+        # We set these here so we always have sensible defaults set.
+        self.LOGFILE = self.get_cfg_entry("log", "LogFilePath", "None")
+        self.LOGLEVFILE = self.get_cfg_entry("log", "LogSeverityFile", "INFO")
+        self.LOGLEVSYS = self.get_cfg_entry("log", "LogSeveritySys", "ERROR")
+        self.LOGLEVSCR = self.get_cfg_entry("log", "LogSeverityScreen", "ERROR")
 
-        self.CONN_TIMEOUT_MS   = int(
-            self.get_cfg_entry("connection",
-                               "ConnectionTimeoutMillis",
-                               40000))
-        self.CONN_KEEPALIVE_MS = int(
-            self.get_cfg_entry("connection",
-                               "ConnectionKeepaliveIntervalMillis",
-                               5000))
+        self.LOGLEVFILE = LOGLEVELS.get(self.LOGLEVFILE.lower(), logging.DEBUG)
+        self.LOGLEVSYS  = LOGLEVELS.get(self.LOGLEVSYS.lower(), logging.DEBUG)
+        self.LOGLEVSCR  = LOGLEVELS.get(self.LOGLEVSCR.lower(), logging.DEBUG)
+
+        cfg_dict = fetcd.load_config(self.HOSTNAME,
+                                     self.ETCD_PORT)
+
+        self.METADATA_IP = cfg_dict.pop("MetadataAddr", "127.0.0.1")
+        self.METADATA_PORT = cfg_dict.pop("MetadataPort", "8775")
+        self.RESYNC_INT_SEC = int(cfg_dict.pop("ResyncIntervalSecs", "1800"))
+        self.LOGFILE = cfg_dict.pop("LogFilePath", self.LOGFILE)
+        self.LOGLEVFILE = cfg_dict.pop("LogSeverityFile", self.LOGLEVFILE)
+        self.LOGLEVSYS = cfg_dict.pop("LogSeveritySys", self.LOGLEVSYS)
+        self.LOGLEVSCR = cfg_dict.pop("LogSeverityScreen", self.LOGLEVSCR)
 
         self.validate_cfg()
 
-        self.warn_unused_cfg()
+        self.warn_unused_cfg(cfg_dict)
 
-        # Finally, convert log level names into python log levels.
-        loglevels = {"none":      None,
-                     "debug":     logging.DEBUG,
-                     "info":      logging.INFO,
-                     "warn":      logging.WARNING,
-                     "warning":   logging.WARNING,
-                     "err":       logging.ERROR,
-                     "error":     logging.ERROR,
-                     "crit":      logging.CRITICAL,
-                     "critical":  logging.CRITICAL}
-
-        self.LOGLEVFILE = loglevels[self.LOGLEVFILE.lower()]
-        self.LOGLEVSYS  = loglevels[self.LOGLEVSYS.lower()]
-        self.LOGLEVSCR  = loglevels[self.LOGLEVSCR.lower()]
+        self.LOGLEVFILE = LOGLEVELS.get(self.LOGLEVFILE.lower(), logging.DEBUG)
+        self.LOGLEVSYS  = LOGLEVELS.get(self.LOGLEVSYS.lower(), logging.DEBUG)
+        self.LOGLEVSCR  = LOGLEVELS.get(self.LOGLEVSCR.lower(), logging.DEBUG)
 
     def read_cfg_file(self, config_file):
         self._parser = ConfigParser.ConfigParser()
@@ -194,8 +183,13 @@ class Config(object):
         #*********************************************************************#
         for section in self._items.keys():
             for lKey in self._items[section].keys():
-                log.warning("Got unexpected item %s=%s in %s" %
-                             (lKey, self._items[section][lKey], self._config_path))
+                log.warning("Got unexpected item %s=%s in %s",
+                            lKey, self._items[section][lKey], self._config_path)
+
+        for lKey in cfg_dict:
+            log.warning("Got unexpected etcd config item %s=%s",
+                        lKey, cfg_dict[lKey])
+
 
     def validate_addr(self, name, addr):
         """

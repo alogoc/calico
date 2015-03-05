@@ -87,26 +87,34 @@ def watchdog():
         gevent.sleep(20)
 
 
-class FakeConfig(object):
-    pass
-
-
 def main():
     try:
         # Initialise the logging with default parameters.
         common.default_logging()
 
-        # TODO: Load config
-        config = FakeConfig()
-        config.METADATA_IP = "127.0.0.1"
-        config.METADATA_PORT = 8080
+        # Load config
+        try:
+            # FIXME: old felix used argparse but that's not in Python 2.6, so
+            # hard-coded path.
 
-        # FIXME: old felix used argparse but that's not in Python 2.6.
+            config = Config("/etc/calico/felix.cfg")
+        except EtcdException:
+            common.complete_logging(config.LOGFILE,
+                                    config.LOGLEVFILE,
+                                    config.LOGLEVSYS,
+                                    config.LOGLEVSCR)
+            raise
+
+        common.complete_logging(config.LOGFILE,
+                                config.LOGLEVFILE,
+                                config.LOGLEVSYS,
+                                config.LOGLEVSCR)
+
         _log.info("Starting up")
         gevent.spawn(_main_greenlet, config).join()  # Should never return
     except BaseException:
         # Make absolutely sure that we exit by asking the OS to terminate our
-        # process.  We don't wan to let a stray background thread keep us
+        # process.  We don't want to let a stray background thread keep us
         # alive.
         _log.exception("Felix exiting due to exception")
         os._exit(1)
